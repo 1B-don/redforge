@@ -80,4 +80,4 @@ fi
 echo "Installed RedForge with branded app icon."
 echo "Open your application launcher and search for RedForge."
 echo "Your engagement data is stored at: $DATA_DIR"
-echo "To use an existing engagement, see the README migration instructions."
+echo "To use another existing engagement, run: redforge gui --root /path/to/engagement"

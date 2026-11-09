@@ -27,6 +27,7 @@ def initialize(root: Path, name: str) -> None:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS scope (cidr TEXT PRIMARY KEY, justification TEXT NOT NULL, added_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS scope_expiry (cidr TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, details TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS findings (id INTEGER PRIMARY KEY, at TEXT NOT NULL, host TEXT NOT NULL, title TEXT NOT NULL, severity TEXT NOT NULL, detail TEXT NOT NULL, evidence TEXT);
         """)
@@ -60,12 +61,44 @@ def require_authorized(db: sqlite3.Connection) -> None:
         raise ValueError("Authorization not confirmed. Run 'redforge authorize' after obtaining permission.")
 
 
-def add_scope(db: sqlite3.Connection, cidr: str, justification: str) -> str:
+def ensure_scope_expiry(db: sqlite3.Connection) -> None:
+    db.execute("CREATE TABLE IF NOT EXISTS scope_expiry (cidr TEXT PRIMARY KEY, expires_at TEXT NOT NULL)")
+
+
+def add_scope(db: sqlite3.Connection, cidr: str, justification: str, expires_at: str | None = None) -> str:
     network = ipaddress.ip_network(cidr, strict=False)
     canonical = str(network)
+    if not justification.strip():
+        raise ValueError("Scope requires an authorization reference")
+    expiry = None
+    if expires_at:
+        try:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Expiry must be an ISO 8601 date/time with timezone") from exc
+        if expiry.tzinfo is None:
+            raise ValueError("Expiry must include a timezone")
+        expiry = expiry.astimezone(timezone.utc)
+        if expiry <= datetime.now(timezone.utc):
+            raise ValueError("Scope expiry must be in the future")
+    ensure_scope_expiry(db)
     db.execute("INSERT OR REPLACE INTO scope VALUES (?,?,?)", (canonical, justification, now()))
+    if expiry:
+        db.execute("INSERT INTO scope_expiry VALUES (?,?) ON CONFLICT(cidr) DO UPDATE SET expires_at=excluded.expires_at",
+                   (canonical, expiry.isoformat()))
+    else:
+        db.execute("DELETE FROM scope_expiry WHERE cidr=?", (canonical,))
     audit(db, "scope_add", canonical)
     return canonical
+
+
+def remove_scope(db: sqlite3.Connection, cidr: str) -> None:
+    canonical = str(ipaddress.ip_network(cidr, strict=False))
+    if db.execute("DELETE FROM scope WHERE cidr=?", (canonical,)).rowcount == 0:
+        raise ValueError(f"Scope {canonical} does not exist")
+    ensure_scope_expiry(db)
+    db.execute("DELETE FROM scope_expiry WHERE cidr=?", (canonical,))
+    audit(db, "scope_remove", canonical)
 
 
 def allowed(db: sqlite3.Connection, address: str) -> bool:
@@ -73,7 +106,10 @@ def allowed(db: sqlite3.Connection, address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False  # Hostnames deliberately unsupported in active checks in v0.1
-    for row in db.execute("SELECT cidr FROM scope"):
+    ensure_scope_expiry(db)
+    for row in db.execute("SELECT s.cidr,e.expires_at FROM scope s LEFT JOIN scope_expiry e ON e.cidr=s.cidr"):
+        if row[1] and datetime.fromisoformat(row[1]) <= datetime.now(timezone.utc):
+            continue
         if ip in ipaddress.ip_network(row[0]):
             return True
     return False

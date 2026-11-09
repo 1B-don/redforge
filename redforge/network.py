@@ -104,28 +104,40 @@ def change_wifi_mode(interface: str, mode: str, *, confirmed: bool = False) -> s
     nmcli = shutil.which('nmcli')
     if not pkexec or not iw or not ip:
         raise RuntimeError('Install policykit-1, iw, and iproute2 to change Wi-Fi modes.')
-    # Inhibit NetworkManager before monitor mode; restore when managed.
-    if mode == 'monitor' and nmcli:
-        _run([nmcli, 'device', 'set', interface, 'managed', 'no'])
+    previous_mode = interfaces[interface]
+    previous_nm = None
+    if nmcli:
+        try:
+            previous_nm = _run([nmcli, '-g', 'GENERAL.NM-MANAGED', 'device', 'show', interface]).strip().lower()
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            pass
     try:
+        if mode == 'monitor' and nmcli:
+            _run([nmcli, 'device', 'set', interface, 'managed', 'no'])
         _run([pkexec, ip, 'link', 'set', 'dev', interface, 'down'], timeout=40)
         _run([pkexec, iw, 'dev', interface, 'set', 'type', mode], timeout=40)
-    except Exception:
-        # Attempt to restore link and NetworkManager even if mode switch fails.
+        _run([pkexec, ip, 'link', 'set', 'dev', interface, 'up'], timeout=40)
+        if mode == 'managed' and nmcli:
+            _run([nmcli, 'device', 'set', interface, 'managed', 'yes'])
+        actual = dict(wifi_interfaces()).get(interface)
+        if actual != mode:
+            raise RuntimeError(f'Mode change not confirmed: {interface} reports {actual}.')
+    except Exception as original:
+        # Best effort: restore the prior mode, bring the link up, and restore
+        # NetworkManager's recorded management state after any failure.
+        recovery_errors = []
         try:
+            _run([pkexec, ip, 'link', 'set', 'dev', interface, 'down'], timeout=40)
+            _run([pkexec, iw, 'dev', interface, 'set', 'type', previous_mode], timeout=40)
             _run([pkexec, ip, 'link', 'set', 'dev', interface, 'up'], timeout=40)
-        except Exception:
-            pass
-        if nmcli:
+        except Exception as exc:
+            recovery_errors.append(str(exc))
+        if nmcli and previous_nm in {'yes', 'no'}:
             try:
-                _run([nmcli, 'device', 'set', interface, 'managed', 'yes'])
-            except Exception:
-                pass
+                _run([nmcli, 'device', 'set', interface, 'managed', previous_nm])
+            except Exception as exc:
+                recovery_errors.append(str(exc))
+        if recovery_errors:
+            raise RuntimeError(f'Mode change failed: {original}; recovery may be incomplete: {"; ".join(recovery_errors)}') from original
         raise
-    _run([pkexec, ip, 'link', 'set', 'dev', interface, 'up'], timeout=40)
-    if mode == 'managed' and nmcli:
-        _run([nmcli, 'device', 'set', interface, 'managed', 'yes'])
-    actual = dict(wifi_interfaces()).get(interface)
-    if actual != mode:
-        raise RuntimeError(f'Mode change not confirmed: {interface} reports {actual}.')
     return f'{interface} switched to {mode} mode.'

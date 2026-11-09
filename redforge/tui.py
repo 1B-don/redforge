@@ -15,10 +15,17 @@ from textual.widgets.option_list import Option
 from textual import work
 from textual.binding import Binding
 
-from .core import initialize, connect, add_scope, authorize, allowed
+from .core import initialize, connect, add_scope, remove_scope, ensure_scope_expiry, authorize, allowed
 from .scanner import scan
 from .webcheck import check
 from .report import report
+from .auto import assess
+from .bundle import export_bundle
+from .compare import compare_runs
+from .review import set_review, search_findings
+from .profiles import save_profile, run_profile, list_profiles
+from .evidence_search import search_evidence
+from .overview import overview
 
 DEFAULT_ROOT = Path('redforge-engagement')
 
@@ -37,7 +44,8 @@ class Home(Screen):
         ("09  Advanced Tools / Help", "advanced"),
         ("10  Auto Scope / Local Interfaces", "autoscope"),
         ("11  Wi-Fi Interface Modes", "wifi"),
-        ("12  Exit RedForge", "quit"),
+        ("12  Automatic Assessment", "auto"),
+        ("13  Exit RedForge", "quit"),
     )
 
     def compose(self) -> ComposeResult:
@@ -48,10 +56,10 @@ class Home(Screen):
  | |_) |  _| | | | | |_ | | | | |_) | |  _|  _|
  |  _ <| |___| |_| |  _|| |_| |  _ <| |_| | |___
  |_| \_\_____|____/|_|   \___/|_| \_\____|_____|[/]
-[dim]     LINUX SECURITY OPERATIONS // v0.9[/]""", classes='banner', markup=True)
+[dim]     LINUX SECURITY OPERATIONS // v0.14[/]""", classes='banner', markup=True)
             yield Static('ENGAGEMENT STATUS', classes='heading')
             yield Static('Loading engagement...', id='status')
-            yield Static('SELECT: 1–9 | A=Auto Scope | B=Wi-Fi Modes | 0=Exit | Arrows+Enter', classes='heading')
+            yield Static('SELECT: 1–9 | A=Auto Scope | B=Wi-Fi | C=Auto Assess | 0=Exit', classes='heading')
             yield OptionList(*(Option(label, id=screen) for label, screen in self.MENU), id='menu')
             yield Static('Only assess assets you own or have explicit permission to test.', classes='hint')
         yield Footer()
@@ -71,11 +79,11 @@ class Home(Screen):
 
     def on_key(self, event: events.Key) -> None:
         # Airgeddon-style instant numbered selection on the home screen.
-        if event.character and event.character.lower() in '1234567890ab':
+        if event.character and event.character.lower() in '1234567890abc':
             event.stop()
             event.prevent_default()
             key = event.character.lower()
-            self.select_number({'0': 12, 'a': 10, 'b': 11}.get(key, int(key) if key.isdigit() else 0))
+            self.select_number({'0': 13, 'a': 10, 'b': 11, 'c': 12}.get(key, int(key) if key.isdigit() else 0))
 
     def select_number(self, number: int) -> None:
         if not 1 <= number <= len(self.MENU):
@@ -88,12 +96,11 @@ class Home(Screen):
 
     def refresh_status(self):
         try:
-            with connect(self.app.engagement_root) as db:
-                name = db.execute("SELECT value FROM settings WHERE key='name'").fetchone()[0]
-                authorized = db.execute("SELECT value FROM settings WHERE key='authorized'").fetchone()[0]
-                scope = db.execute('SELECT COUNT(*) FROM scope').fetchone()[0]
-                findings = db.execute('SELECT COUNT(*) FROM findings').fetchone()[0]
-            message = f'[bold]{name}[/]  |  AUTH: {authorized.upper()}  |  SCOPE: {scope}  |  OBSERVATIONS: {findings}'
+            state = overview(self.app.engagement_root)
+            findings = sum(state['findings'].values())
+            message = (f"[bold]{state['engagement']}[/] | AUTH: {'YES' if state['authorized'] else 'NO'} "
+                       f"| SCOPE: {state['scope_active']} active / {state['scope_expired']} expired "
+                       f"| FINDINGS: {findings} | RUNS: {state['runs']}")
         except (ValueError, OSError, TypeError):
             message = '[yellow]No engagement loaded. Select 01 to create or open one.[/]'
         self.query_one('#status', Static).update(message)
@@ -212,7 +219,7 @@ class Engagement(BaseScreen):
 
 
 class Scope(BaseScreen):
-    ACTIONS = (('add', 'add'), ('show', 'show'))
+    ACTIONS = (('add', 'add'), ('show', 'show'), ('remove', 'remove'))
     title_text = 'Scope Management'
 
     def content(self):
@@ -220,22 +227,31 @@ class Scope(BaseScreen):
         yield Input(placeholder='127.0.0.1/32', id='cidr')
         yield Label('Permission / engagement reference')
         yield Input(placeholder='My own local system', id='reason')
+        yield Label('Optional expiry (ISO 8601 with timezone, e.g. 2027-01-01T00:00:00Z)')
+        yield Input(placeholder='Leave blank if no expiry is recorded', id='expires')
         yield Button('1  Add Scope', id='add', variant='primary')
         yield Button('2  Show Scope', id='show')
         yield DataTable(id='table')
+        yield Button('3  Remove Selected Scope', id='remove')
 
     def on_mount(self):
         super().on_mount()
-        self.query_one('#table', DataTable).add_columns('CIDR', 'Authorization reference')
+        table = self.query_one('#table', DataTable)
+        table.cursor_type = 'row'
+        table.add_columns('CIDR', 'Authorization reference', 'Expires (UTC)')
+        self.scope_cidrs = []
         self.refresh_table()
 
     def refresh_table(self):
         table = self.query_one('#table', DataTable)
         table.clear()
+        self.scope_cidrs = []
         try:
             with connect(self.root) as db:
-                for row in db.execute('SELECT cidr, justification FROM scope ORDER BY cidr'):
-                    table.add_row(str(row[0]), str(row[1]))
+                ensure_scope_expiry(db)
+                for row in db.execute('SELECT s.cidr,s.justification,e.expires_at FROM scope s LEFT JOIN scope_expiry e ON e.cidr=s.cidr ORDER BY s.cidr'):
+                    self.scope_cidrs.append(row[0])
+                    table.add_row(str(row[0]), str(row[1]), str(row[2] or 'No expiry recorded'))
         except ValueError:
             pass
 
@@ -246,8 +262,16 @@ class Scope(BaseScreen):
                 if not reason:
                     raise ValueError('Enter an authorization reference.')
                 with connect(self.root) as db:
-                    cidr = add_scope(db, self.query_one('#cidr', Input).value.strip(), reason)
+                    cidr = add_scope(db, self.query_one('#cidr', Input).value.strip(), reason,
+                                     self.query_one('#expires', Input).value.strip() or None)
                 self.show_message(f'Added {cidr}')
+            elif action == 'remove':
+                index = self.query_one('#table', DataTable).cursor_row
+                if index < 0 or index >= len(self.scope_cidrs):
+                    raise ValueError('Select a scope entry first.')
+                with connect(self.root) as db:
+                    remove_scope(db, self.scope_cidrs[index])
+                self.show_message('Scope entry removed.')
             self.refresh_table()
         except (ValueError, OSError) as exc:
             self.show_message(f'Error: {exc}')
@@ -382,32 +406,77 @@ class Web(BaseScreen):
 
 
 class Findings(BaseScreen):
-    ACTIONS = (('refresh', 'refresh'),)
+    ACTIONS = (('refresh', 'refresh'), ('review', 'review'), ('evidence', 'evidence'))
     title_text = 'Findings and Observations'
 
     def content(self):
         yield Label('Every assessment observation is preserved; repeated findings may appear more than once.')
-        yield Button('1  Refresh Findings', id='refresh', variant='primary')
+        yield Input(placeholder='Filter host (exact IP)', id='host')
+        yield Input(placeholder='Search finding text', id='text')
+        yield Input(placeholder='Filter review status', id='filter-status')
+        yield Button('1  Search / Refresh Findings', id='refresh', variant='primary')
         yield DataTable(id='table')
+        yield Input(placeholder='Review: confirmed, false_positive, resolved, unreviewed', id='review-status')
+        yield Input(placeholder='Analyst note (optional)', id='note')
+        yield Button('2  Review Selected Finding', id='review')
+        yield Input(placeholder='Evidence port (optional)', id='evidence-port')
+        yield Input(placeholder='Evidence check: tcp, ssh, tls, http (optional)', id='evidence-check')
+        yield Button('3  Search Evidence', id='evidence')
+        yield RichLog(id='evidence-results', wrap=True, markup=False)
 
     def on_mount(self):
         super().on_mount()
-        self.query_one('#table', DataTable).add_columns('ID', 'Host', 'Severity', 'Finding', 'Evidence')
+        table = self.query_one('#table', DataTable)
+        table.cursor_type = 'row'
+        table.add_columns('ID', 'Host', 'Severity', 'Status', 'Finding', 'Evidence')
+        self.finding_ids = []
         self.refresh_table()
 
     def refresh_table(self):
         table = self.query_one('#table', DataTable)
         table.clear()
         try:
-            with connect(self.root) as db:
-                for row in db.execute('SELECT id,host,severity,title,evidence FROM findings ORDER BY id DESC LIMIT 500'):
-                    table.add_row(*(str(v or '') for v in row))
+            rows = search_findings(self.root,
+                host=self.query_one('#host', Input).value.strip() or None,
+                text=self.query_one('#text', Input).value.strip() or None,
+                status=self.query_one('#filter-status', Input).value.strip() or None)
+            self.finding_ids = [row['id'] for row in rows]
+            for row in rows:
+                table.add_row(*(str(row[key] or '') for key in ('id','host','severity','review_status','title','evidence')))
+            self.show_message(f'{len(rows)} finding(s) matched.')
         except ValueError as exc:
             self.show_message(str(exc))
 
     def handle_action(self, action):
         if action == 'refresh':
             self.refresh_table()
+        elif action == 'review':
+            index = self.query_one('#table', DataTable).cursor_row
+            if index < 0 or index >= len(self.finding_ids):
+                self.show_message('Select a finding first.')
+                return
+            try:
+                set_review(self.root, self.finding_ids[index],
+                           self.query_one('#review-status', Input).value.strip(),
+                           self.query_one('#note', Input).value.strip())
+                self.refresh_table()
+            except (ValueError, OSError) as exc:
+                self.show_message(f'Error: {exc}')
+        elif action == 'evidence':
+            try:
+                raw_port = self.query_one('#evidence-port', Input).value.strip()
+                rows = search_evidence(self.root,
+                    host=self.query_one('#host', Input).value.strip() or None,
+                    text=self.query_one('#text', Input).value.strip() or None,
+                    port=int(raw_port) if raw_port else None,
+                    check=self.query_one('#evidence-check', Input).value.strip() or None)
+                log = self.query_one('#evidence-results', RichLog)
+                log.clear()
+                for row in rows:
+                    log.write(f"{row['at']} | {row['host']} | {row['check']} | {row['file']}")
+                self.show_message(f'{len(rows)} evidence file(s) matched.')
+            except (ValueError, OSError) as exc:
+                self.show_message(f'Error: {exc}')
 
 
 class Assets(BaseScreen):
@@ -472,8 +541,104 @@ class History(BaseScreen):
             self.refresh_table()
 
 
+class AutomaticAssessment(BaseScreen):
+    ACTIONS = (('run', 'run'), ('save', 'save'), ('run-profile', 'run-profile'), ('profiles', 'profiles'))
+    title_text = 'Automatic Assessment'
+
+    def content(self):
+        yield Label('Approved literal IPs (comma-separated, maximum 16)')
+        yield Input(placeholder='192.0.2.10,192.0.2.11', id='targets')
+        yield Label('TCP ports (1–32 comma-separated)')
+        yield Input(value='22,80,443,8080,8443', id='ports')
+        yield Button('1  Run Assessment', id='run', variant='primary')
+        yield Input(placeholder='Saved profile name', id='profile-name')
+        yield Button('2  Save These Targets as Profile', id='save')
+        yield Button('3  Run Saved Profile', id='run-profile')
+        yield Button('4  List Saved Profiles', id='profiles')
+        yield RichLog(id='results', highlight=True, markup=True, wrap=True)
+
+    def on_mount(self):
+        super().on_mount()
+        self.cancel_event = Event()
+
+    def on_screen_suspend(self):
+        self.cancel_event.set()
+
+    def on_unmount(self):
+        self.cancel_event.set()
+
+    def handle_action(self, action):
+        if action == 'profiles':
+            try:
+                rows = list_profiles(self.root)
+                log = self.query_one('#results', RichLog)
+                log.clear()
+                for row in rows:
+                    log.write(f"{row['name']}: {', '.join(row['targets'])} | ports {row['ports']}")
+                self.show_message(f'{len(rows)} saved profile(s).')
+            except (ValueError, OSError) as exc:
+                self.show_message(f'Error: {exc}')
+            return
+        if action == 'save':
+            try:
+                targets = [value.strip() for value in self.query_one('#targets', Input).value.split(',') if value.strip()]
+                save_profile(self.root, self.query_one('#profile-name', Input).value.strip(),
+                             targets, self.query_one('#ports', Input).value.strip())
+                self.show_message('Profile saved.')
+            except (ValueError, OSError) as exc:
+                self.show_message(f'Error: {exc}')
+            return
+        if action == 'run-profile':
+            self.cancel_event.clear()
+            self.query_one('#run-profile', Button).disabled = True
+            self.query_one('#run', Button).disabled = True
+            self.show_message('Running saved profile...')
+            self.run_saved_profile(self.query_one('#profile-name', Input).value.strip())
+            return
+        if action == 'run':
+            self.cancel_event.clear()
+            targets = [value.strip() for value in self.query_one('#targets', Input).value.split(',') if value.strip()]
+            ports = self.query_one('#ports', Input).value.strip()
+            self.query_one('#run', Button).disabled = True
+            self.query_one('#run-profile', Button).disabled = True
+            self.show_message('Assessing approved targets...')
+            self.run_assessment(targets, ports)
+
+    @work(thread=True, exclusive=True)
+    def run_assessment(self, targets, ports):
+        try:
+            result = assess(self.root, targets, ports, cancel=self.cancel_event)
+            lines = [f"{row['target']}: {len(row['open_ports'])} open port(s), {len(row['checks'])} checks" for row in result['targets']]
+            lines.extend(error for row in result['targets'] for error in row['errors'])
+            lines.extend(f"Change alert: {alert}" for alert in result.get('alerts', []))
+            message = f"Run {result['run_id']} complete. Review findings or compare runs."
+        except Exception as exc:
+            message, lines = f'Error: {exc}', []
+        if self.is_mounted and not self.cancel_event.is_set():
+            self.app.call_from_thread(self.finish, message, lines)
+
+    def finish(self, message, lines):
+        self.show_message(message)
+        log = self.query_one('#results', RichLog)
+        for line in lines:
+            log.write(line)
+        self.query_one('#run', Button).disabled = False
+        self.query_one('#run-profile', Button).disabled = False
+
+    @work(thread=True, exclusive=True)
+    def run_saved_profile(self, name):
+        try:
+            result = run_profile(self.root, name, cancel=self.cancel_event)
+            message = f"Profile run {result['run_id']} complete; {len(result['alerts'])} change alert(s)."
+            lines = [str(alert) for alert in result['alerts']]
+        except Exception as exc:
+            message, lines = f'Error: {exc}', []
+        if self.is_mounted and not self.cancel_event.is_set():
+            self.app.call_from_thread(self.finish, message, lines)
+
+
 class Reports(BaseScreen):
-    ACTIONS = (('html', 'html'), ('json', 'json'))
+    ACTIONS = (('html', 'html'), ('json', 'json'), ('bundle', 'bundle'))
     title_text = 'Export Engagement Report'
 
     def content(self):
@@ -481,15 +646,16 @@ class Reports(BaseScreen):
         yield Input(value='redforge-report.html', id='filename')
         yield Button('1  Export HTML', id='html', variant='primary')
         yield Button('2  Export JSON', id='json')
+        yield Button('3  Export Complete Bundle (ZIP)', id='bundle')
 
     def handle_action(self, action):
-        if action in ('html', 'json'):
+        if action in ('html', 'json', 'bundle'):
             try:
                 dest = Path(self.query_one('#filename', Input).value.strip())
                 if not dest.name:
                     raise ValueError('Enter an output filename')
-                dest = dest.with_suffix('.' + action)
-                result = report(self.root, dest, action)
+                dest = dest.with_suffix('.zip' if action == 'bundle' else '.' + action)
+                result = export_bundle(self.root, dest) if action == 'bundle' else report(self.root, dest, action)
                 self.show_message(f'Exported: {result}')
             except (ValueError, OSError) as exc:
                 self.show_message(f'Error: {exc}')
@@ -509,6 +675,8 @@ Create / Open. Record authorization only for systems you are permitted to assess
 [bold]2. SCOPE[/]
 Select [bold]2[/] from Home. Enter an approved literal IP or CIDR, such as
 127.0.0.1/32, and an authorization reference. Choose Add Scope.
+You may add an expiry with timezone; expired scope cannot be scanned.
+Select a scope row and choose Remove Selected Scope to revoke it.
 
 [bold]3. TCP RECONNAISSANCE[/]
 Select [bold]3[/]. Type the target IP, press Enter, type a comma-separated
@@ -521,12 +689,23 @@ Missing headers are observations, not proof of an exploitable weakness.
 
 [bold]5–7. REVIEW RESULTS[/]
 Browse discovered assets, stored findings/evidence, and audit history.
+In Findings, filter by host, text, or review status; select a row to mark it
+confirmed, false_positive, resolved, or unreviewed and add an analyst note.
+Search evidence separately by host, text, port, or check type.
 
 [bold]8. REPORTS[/]
-Enter a filename and choose HTML or JSON export.
+Enter a filename and choose HTML, JSON, or a complete evidence ZIP export.
+Use `redforge verify-bundle FILE.zip` to check an exported bundle.
+
+[bold]C. AUTOMATIC ASSESSMENT[/]
+Enter up to 16 explicitly approved IPs. RedForge scans selected ports and
+inspects common SSH, HTTP, and TLS services found open. Back or Esc cancels.
+Each completed run receives an ID. Advanced Tools → 7 compares the latest two.
+Enter a profile name to save and rerun approved targets. Changes from the
+previous run appear as alerts; stored profiles recheck scope when run.
 
 [bold]KEYBOARD SHORTCUTS[/]
-Home: 1–9 select modules; A = Auto Scope; B = Wi-Fi Modes; 0 exits. Advanced Tools → 5 opens Help. Arrow keys and Enter also work.
+Home: 1–9 select modules; A = Auto Scope; B = Wi-Fi Modes; C = Auto Assessment; 0 exits. Advanced Tools → 5 opens Help. Arrow keys and Enter also work.
 Within modules: Tab / Shift+Tab change focus; Enter advances fields.
 Esc returns to Home. Ctrl+Q exits. No mouse required.
 
@@ -550,19 +729,21 @@ RedForge does not verify legal permission independently.
 class Advanced(BaseScreen):
     title_text = 'Advanced Tools / Help'
     ACTIONS = (('tls', 'tls'), ('manifest', 'manifest'), ('verify', 'verify'),
-               ('summary', 'summary'), ('help', 'help'))
+               ('summary', 'summary'), ('help', 'help'), ('ssh', 'ssh'), ('compare', 'compare'))
 
     def content(self):
-        yield Static('TLS checks require a scoped, authorized literal IP. Evidence tools are local-only.')
-        yield Label('TLS target IP')
+        yield Static('Service checks require a scoped, authorized literal IP. Evidence tools are local-only.')
+        yield Label('Target IP')
         yield Input(value='127.0.0.1', id='target')
-        yield Label('TLS port')
+        yield Label('Service port (443 for TLS, 22 for SSH)')
         yield Input(value='443', id='port')
         yield Button('1  Inspect TLS', id='tls', variant='primary')
         yield Button('2  Create SHA-256 Evidence Manifest', id='manifest')
         yield Button('3  Verify Evidence Manifest', id='verify')
         yield Button('4  Summarize Duplicate Findings', id='summary')
         yield Button('5  Open Help / User Guide', id='help')
+        yield Button('6  Inspect SSH Banner', id='ssh')
+        yield Button('7  Compare Latest Two Assessments', id='compare')
         yield RichLog(id='results', wrap=True, markup=False)
 
     def on_mount(self):
@@ -576,15 +757,15 @@ class Advanced(BaseScreen):
         if action == 'help':
             self.app.push_screen('help')
             return
-        if action == 'tls':
+        if action in ('tls', 'ssh'):
             try:
                 port = int(self.query_one('#port', Input).value)
             except ValueError:
                 self.show_message('Port must be an integer')
                 return
-            self.query_one('#tls', Button).disabled = True
-            self.show_message('Inspecting TLS...')
-            self.inspect_tls(self.query_one('#target', Input).value.strip(), port)
+            self.query_one(f'#{action}', Button).disabled = True
+            self.show_message(f'Inspecting {action.upper()}...')
+            self.inspect_service(action, self.query_one('#target', Input).value.strip(), port)
             return
         try:
             if action == 'manifest':
@@ -603,23 +784,39 @@ class Advanced(BaseScreen):
                 for host, title, count in rows:
                     log.write(f'{host} | {count} observation(s) | {title}')
                 self.show_message(f'{len(rows)} grouped findings')
+            elif action == 'compare':
+                result = compare_runs(self.root)
+                log = self.query_one('#results', RichLog)
+                log.clear()
+                for change in result['changes']:
+                    if change['kind'] == 'observation_changed':
+                        log.write(f"{change['target']} {change['check']}: {change['before']} → {change['after']}")
+                    else:
+                        log.write(f"{change['target']}: {change['kind']} TCP {change['port']}")
+                if result['not_compared']:
+                    log.write('Targets present in one run only: ' + ', '.join(result['not_compared']))
+                self.show_message(f"Run {result['before']} → {result['after']}: {len(result['changes'])} change(s)")
         except (ValueError, OSError) as exc:
             self.show_message(f'Error: {exc}')
 
     @work(thread=True, exclusive=True)
-    def inspect_tls(self, target, port):
-        from .tlscheck import inspect
+    def inspect_service(self, service, target, port):
         try:
+            if service == 'ssh':
+                from .sshcheck import inspect
+            else:
+                from .tlscheck import inspect
             result = inspect(self.root, target, port, cancel=self.cancel_event)
-            message = f"TLS {result['protocol']} | {result['cipher']} | Trust NOT verified"
+            message = (f"SSH {result['banner']}" if service == 'ssh' else
+                       f"TLS {result['protocol']} | {result['cipher']} | Certificate SHA-256: {result['peer_certificate_sha256']} | Trust NOT verified")
         except Exception as exc:
             message = f'Error: {exc}'
         if self.is_mounted and not self.cancel_event.is_set():
-            self.app.call_from_thread(self.finish_tls, message)
+            self.app.call_from_thread(self.finish_service, service, message)
 
-    def finish_tls(self, message):
+    def finish_service(self, service, message):
         self.show_message(message)
-        self.query_one('#tls', Button).disabled = False
+        self.query_one(f'#{service}', Button).disabled = False
 
 class AutoScope(BaseScreen):
     title_text = 'Auto Scope / Local Network Suggestions'
@@ -773,7 +970,7 @@ class RedForgeTUI(App):
     SCREENS = {'home': Home, 'engagement': Engagement, 'scope': Scope, 'scan': Scan,
                'web': Web, 'assets': Assets, 'findings': Findings,
                'history': History, 'reports': Reports, 'help': Help, 'advanced': Advanced,
-               'autoscope': AutoScope, 'wifi': WiFiModes}
+               'autoscope': AutoScope, 'wifi': WiFiModes, 'auto': AutomaticAssessment}
 
     def __init__(self, root: Path = DEFAULT_ROOT):
         super().__init__()
@@ -787,12 +984,12 @@ class RedForgeTUI(App):
         if isinstance(self.focused, Input):
             return  # Never steal digits while editing IPs, ports or paths.
         digit = event.character
-        if not digit or digit.lower() not in '0123456789ab':
+        if not digit or digit.lower() not in '0123456789abc':
             return
         current = self.screen
         if isinstance(current, Home):
             key = digit.lower()
-            current.select_number({'0': 12, 'a': 10, 'b': 11}.get(key, int(key) if key.isdigit() else 0))
+            current.select_number({'0': 13, 'a': 10, 'b': 11, 'c': 12}.get(key, int(key) if key.isdigit() else 0))
             event.stop()
             event.prevent_default()
         elif isinstance(current, BaseScreen):
@@ -800,7 +997,7 @@ class RedForgeTUI(App):
                 self.action_back()
                 event.stop()
                 event.prevent_default()
-            elif 1 <= int(digit) <= len(current.ACTIONS):
+            elif digit.isdigit() and 1 <= int(digit) <= len(current.ACTIONS):
                 current.handle_action(current.ACTIONS[int(digit) - 1][1])
                 event.stop()
                 event.prevent_default()

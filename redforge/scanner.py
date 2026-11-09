@@ -12,7 +12,7 @@ from defusedxml import ElementTree
 from .core import connect, require_target, audit, evidence_file, add_finding, now
 
 
-def scan(root: Path, target: str, ports: str = "22,80,443,8080", cancel: threading.Event | None = None) -> dict:
+def parse_ports(ports: str) -> list[int]:
     # Restrict the user-controlled port expression to a bounded, explicit list.
     tokens = ports.split(",")
     if not tokens or len(tokens) > 32:
@@ -23,11 +23,16 @@ def scan(root: Path, target: str, ports: str = "22,80,443,8080", cancel: threadi
         raise ValueError("Ports must be integers, not ranges or Nmap options.") from exc
     if any(not 1 <= p <= 65535 for p in nums):
         raise ValueError("Port must be between 1 and 65535.")
+    return sorted(set(nums))
+
+
+def scan(root: Path, target: str, ports: str = "22,80,443,8080", cancel: threading.Event | None = None) -> dict:
+    nums = parse_ports(ports)
     with connect(root) as db:
         target = require_target(db, target)
         if not shutil.which("nmap"):
             raise ValueError("Nmap is missing. Install it with: sudo apt install nmap")
-        cmd = ["nmap", "-sT", "-Pn", "-n", "--max-retries", "1", "--host-timeout", "90s", "-p", ",".join(map(str, sorted(set(nums)))), "-oX", "-", target]
+        cmd = ["nmap", "-sT", "-Pn", "-n", "--max-retries", "1", "--host-timeout", "90s", "-p", ",".join(map(str, nums)), "-oX", "-", target]
         audit(db, "scan_start", json.dumps({"target": target, "ports": nums}))
         # A cancellable process group ensures Back/ESC actually stops Nmap.
         if cancel is not None and cancel.is_set():
