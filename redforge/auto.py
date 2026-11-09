@@ -69,7 +69,8 @@ def assess(root: Path, targets: list[str], ports: str = "22,80,443,8080,8443", c
                     else:
                         item["observations"][f"http:{port}"] = {
                             "status": observation.get("status"),
-                            "missing_security_headers": observation.get("missing_security_headers")}
+                            "missing_security_headers": observation.get("missing_security_headers"),
+                            "cookies": observation.get("cookies", [])}
                 except (ValueError, OSError, TimeoutError) as exc:
                     item["errors"].append(f"{label} on {port}: {exc}")
         results.append(item)

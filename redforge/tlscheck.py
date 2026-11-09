@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed25519, ed448, rsa
 from cryptography.x509.oid import NameOID
 from .core import connect, require_target, audit, evidence_file, add_finding, now
 
@@ -37,6 +38,15 @@ def inspect(root: Path, target: str, port: int = 443, cancel: threading.Event | 
                     days_remaining = (expiry - datetime.now(timezone.utc)).days if expiry else None
                     common_names = certificate.subject.get_attributes_for_oid(NameOID.COMMON_NAME) if certificate else []
                     issuer_names = certificate.issuer.get_attributes_for_oid(NameOID.COMMON_NAME) if certificate else []
+                    public_key = certificate.public_key() if certificate else None
+                    key_type = ("RSA" if isinstance(public_key, rsa.RSAPublicKey) else
+                                "EC" if isinstance(public_key, ec.EllipticCurvePublicKey) else
+                                "DSA" if isinstance(public_key, dsa.DSAPublicKey) else
+                                "Ed25519" if isinstance(public_key, ed25519.Ed25519PublicKey) else
+                                "Ed448" if isinstance(public_key, ed448.Ed448PublicKey) else
+                                type(public_key).__name__ if public_key else None)
+                    key_bits = getattr(public_key, "key_size", None)
+                    signature_hash = certificate.signature_hash_algorithm if certificate else None
                     try:
                         san = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value if certificate else None
                         dns_names = san.get_values_for_type(x509.DNSName) if san else []
@@ -54,6 +64,8 @@ def inspect(root: Path, target: str, port: int = 443, cancel: threading.Event | 
                         'certificate_not_before': start.isoformat() if start else None,
                         'certificate_not_after': expiry.isoformat() if expiry else None,
                         'certificate_days_remaining': days_remaining,
+                        'certificate_key_type': key_type, 'certificate_key_bits': key_bits,
+                        'certificate_signature_hash': signature_hash.name if signature_hash else None,
                         'chain_trust_verified': False, 'hostname_verified': False,
                         'note': 'Inspection only; certificate trust and hostname have not been verified.'
                     }
@@ -76,4 +88,13 @@ def inspect(root: Path, target: str, port: int = 443, cancel: threading.Event | 
             elif days <= 30:
                 add_finding(db, target, 'TLS certificate expires soon', 'low',
                             f'Peer certificate expires in {days} day(s) on TCP {port}. Trust and hostname were not verified.', ev)
+        key_type = result['certificate_key_type']
+        key_bits = result['certificate_key_bits']
+        if (key_type in ('RSA', 'DSA') and key_bits is not None and key_bits < 2048) or (
+                key_type == 'EC' and key_bits is not None and key_bits < 224):
+            add_finding(db, target, 'Weak TLS certificate public key observed', 'medium',
+                        f'{key_type} {key_bits}-bit public key on TCP {port}; confirm certificate deployment and policy.', ev)
+        if result['certificate_signature_hash'] in ('sha1', 'md5'):
+            add_finding(db, target, 'Legacy TLS certificate signature hash observed', 'medium',
+                        f"Certificate uses {result['certificate_signature_hash']} on TCP {port}; confirm certificate chain and policy.", ev)
         return result

@@ -63,3 +63,24 @@ def test_tls_near_expiry_records_metadata_and_finding(tmp_path):
     assert len(result['peer_certificate_sha256']) == 64
     with connect(tmp_path) as db:
         assert db.execute("SELECT title FROM findings WHERE title='TLS certificate expires soon'").fetchone()
+
+
+def test_weak_rsa_certificate_is_observed(tmp_path):
+    initialize(tmp_path, 'Test')
+    with connect(tmp_path) as db:
+        add_scope(db, '127.0.0.1/32', 'Local')
+        authorize(db, True)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'weak.test')])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1)).not_valid_after(now + timedelta(days=365))
+            .sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+    with patch('redforge.tlscheck.socket.create_connection', return_value=FakeConnection()), \
+         patch('redforge.tlscheck.ssl.SSLContext', return_value=FakeContext(cert)):
+        result = inspect(tmp_path, '127.0.0.1')
+    assert result['certificate_key_type'] == 'RSA'
+    assert result['certificate_key_bits'] == 1024
+    with connect(tmp_path) as db:
+        assert db.execute("SELECT 1 FROM findings WHERE title='Weak TLS certificate public key observed'").fetchone()

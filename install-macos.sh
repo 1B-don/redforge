@@ -46,8 +46,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>RedForge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.15.0</string>
-  <key>CFBundleVersion</key><string>15</string>
+  <key>CFBundleShortVersionString</key><string>0.17.0</string>
+  <key>CFBundleVersion</key><string>17</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

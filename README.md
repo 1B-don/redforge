@@ -1,6 +1,8 @@
-# RedForge 0.15
+# RedForge 0.17
 
 RedForge is a macOS and Linux terminal workbench for explicitly authorized security assessments. It records scope, observations, evidence, and audit history in a local engagement directory. Active checks require an authorization acknowledgement and a literal IP address within configured scope.
+
+The home screen now acts as a unified cybersecurity hub. **Continue Setup / Assessment** guides an operator through a local host audit, scope and authorization, assessment, review, and export. Press **E** for a searchable catalog spanning network assessment, local defense, evidence, and setup. Press **D** for system readiness. These are shortcuts into the existing tools; no scan starts simply by opening the hub.
 
 ## macOS app
 
@@ -40,6 +42,10 @@ redforge profile-save lab 192.0.2.10 --root ./redforge-engagement
 redforge profile-run lab --root ./redforge-engagement
 redforge search-findings --host 192.0.2.10 --root ./redforge-engagement
 redforge search-evidence --host 192.0.2.10 --check tls --root ./redforge-engagement
+redforge file-baseline config /path/to/local/config --root ./redforge-engagement
+redforge file-verify config --root ./redforge-engagement
+redforge doctor --root ./redforge-engagement
+redforge host-audit --root ./redforge-engagement
 redforge overview --root ./redforge-engagement
 redforge export-bundle --output ./redforge-bundle.zip --root ./redforge-engagement
 redforge verify-bundle ./redforge-bundle.zip
@@ -51,7 +57,11 @@ Each automatic assessment saves a numbered snapshot. `compare-runs` compares the
 
 `profile-save` stores target and port selections; `profile-run` rechecks current authorization and scope before any network activity. Automatic runs display change alerts and record them in audit history. The Findings screen and `review-finding` command let an analyst mark an observation `confirmed`, `false_positive`, `resolved`, or `unreviewed` and add a note. Reports include these decisions. `search-findings` and `search-evidence` filter stored records; evidence search includes successful checks that produced no finding. A port filter on findings matches exact TCP port observations, while evidence search includes port fields and TCP scan results.
 
-TLS inspection records subject and issuer common names, DNS and IP subject alternative names, validity dates, and days remaining. It adds observations for expired or soon-to-expire peer certificates. This inspection still does not verify certificate trust or hostname matching.
+TLS inspection records subject and issuer common names, DNS and IP subject alternative names, validity dates, days remaining, public-key type and size, and signature hash. It adds observations for expired or soon-to-expire certificates, weak public keys, and legacy signature hashes. This inspection still does not verify certificate trust or hostname matching.
+
+HTTP inspection reads one HEAD response, records missing security headers and cookie flag observations, and redacts cookie values from evidence. Cookie flag observations need manual validation because some cookies intentionally remain available to browser scripts. The offline file integrity tool saves SHA-256 hashes for up to 10,000 regular files in a chosen folder and later reports changed, missing, or new files. It skips symlinks and does not copy monitored files into the engagement. File baseline manifests are included in ZIP exports. Hashes detect changes but do not establish file origin or authenticity.
+
+`doctor` checks local readiness without scanning. `host-audit` reads selected local controls: macOS application firewall, FileVault, and System Integrity Protection; on Linux it checks available UFW or firewalld status. Unknown or inaccessible status remains unknown and does not become a finding. Definite disabled status is recorded as a low-severity observation for review. The host audit changes no system settings and requires an initialized engagement for evidence storage.
 
 Scope entries can have an ISO 8601 expiry with timezone. Expired entries remain in history and reports, but no longer permit active checks. `redforge scope remove CIDR` revokes an entry immediately. The dashboard shows active and expired scope counts, and `overview` summarizes scope, finding review progress, assessment runs, and change alerts. `verify-bundle` checks every archive member against the bundled SHA-256 manifest without extracting it. The manifest detects changes but is not a digital signature or proof of origin.
 

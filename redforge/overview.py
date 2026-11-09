@@ -22,8 +22,9 @@ def overview(root: Path) -> dict:
             FROM findings f LEFT JOIN finding_reviews r ON r.finding_id=f.id GROUP BY COALESCE(r.status,'unreviewed')""")}
         latest = db.execute("SELECT id,at FROM assessment_runs ORDER BY id DESC LIMIT 1").fetchone()
         alerts = db.execute("SELECT COUNT(*) FROM audit WHERE action='change_alert'").fetchone()[0]
+        host_audits = db.execute("SELECT COUNT(*) FROM audit WHERE action='host_audit'").fetchone()[0]
         return {"engagement": name, "authorized": authorized,
                 "scope_active": active, "scope_expired": len(scopes) - active,
                 "findings": reviews, "latest_run": dict(latest) if latest else None,
                 "runs": db.execute("SELECT COUNT(*) FROM assessment_runs").fetchone()[0],
-                "runs_with_changes": alerts}
+                "runs_with_changes": alerts, "host_audits": host_audits}

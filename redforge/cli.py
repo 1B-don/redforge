@@ -16,6 +16,9 @@ from .review import set_review, search_findings
 from .profiles import save_profile, list_profiles, run_profile
 from .evidence_search import search_evidence
 from .overview import overview
+from .fileguard import create_baseline, verify_baseline
+from .diagnostics import diagnose
+from .hostcheck import inspect as inspect_host
 
 app = typer.Typer(help="RedForge: scope-controlled security assessment workbench", no_args_is_help=False)
 scope_app = typer.Typer(help="Manage explicitly approved IP/CIDR scope")
@@ -139,6 +142,10 @@ def web_headers(target: str, port: int = typer.Option(80), tls: bool = typer.Opt
         result = check(root, target, port, tls)
         console.print(f"[green]HTTP status:[/green] {result['status']}")
         console.print("Not observed:", ", ".join(result["missing_security_headers"]) or "none")
+        console.print(f"Cookies observed: {len(result['cookies'])} (values redacted)")
+        for cookie in result['cookies']:
+            if cookie['issues']:
+                console.print(f"  [yellow]{cookie['name']}: {', '.join(cookie['issues'])}[/yellow]")
     except (ValueError, OSError, TimeoutError) as exc:
         fail(exc)
     except Exception as exc:
@@ -228,9 +235,33 @@ def engagement_overview(root: Path = typer.Option(DEFAULT)):
         console.print(f"[bold]{result['engagement']}[/bold] | authorized: {result['authorized']}")
         console.print(f"Scope: {result['scope_active']} active, {result['scope_expired']} expired")
         console.print(f"Findings: {result['findings']}")
-        console.print(f"Runs: {result['runs']} | runs with changes: {result['runs_with_changes']}")
+        console.print(f"Host audits: {result['host_audits']} | runs: {result['runs']} | runs with changes: {result['runs_with_changes']}")
         if result['latest_run']:
             console.print(f"Latest run: {result['latest_run']['id']} at {result['latest_run']['at']}")
+    except (ValueError, OSError) as exc:
+        fail(exc)
+
+
+@app.command("doctor")
+def doctor(root: Path = typer.Option(DEFAULT)):
+    """Check platform tools and show the next useful setup step."""
+    state = diagnose(root)
+    table = Table("Check", "Status", "Detail")
+    for item in state["checks"]:
+        table.add_row(item["name"], item["status"], item["detail"])
+    console.print(table)
+    console.print(f"Next step: {state['next_step']['label']}")
+
+
+@app.command("host-audit")
+def host_audit(root: Path = typer.Option(DEFAULT)):
+    """Record read-only local firewall and platform security settings."""
+    try:
+        result = inspect_host(root)
+        table = Table("Local control", "Observed status")
+        for item in result['checks']:
+            table.add_row(item['name'], item['status'])
+        console.print(table)
     except (ValueError, OSError) as exc:
         fail(exc)
 
@@ -346,6 +377,7 @@ def tls_inspect(target: str, port: int = typer.Option(443), root: Path = typer.O
         if result['certificate_not_after']:
             console.print(f"Certificate expires: {result['certificate_not_after']} ({result['certificate_days_remaining']} days remaining)")
             console.print(f"Subject: {result['certificate_subject_cn']} | Issuer: {result['certificate_issuer_cn']}")
+            console.print(f"Public key: {result['certificate_key_type']} {result['certificate_key_bits'] or ''} | Signature: {result['certificate_signature_hash']}")
         console.print('[yellow]Certificate trust and hostname not verified.[/yellow]')
     except (ValueError, OSError, InterruptedError) as exc:
         fail(exc)
@@ -378,6 +410,27 @@ def evidence_verify(root: Path = typer.Option(DEFAULT)):
     from .integrity import verify_manifest
     try:
         result = verify_manifest(root)
+        console.print(result)
+        if not result['ok']:
+            raise typer.Exit(code=1)
+    except (ValueError, OSError) as exc:
+        fail(exc)
+
+
+@app.command('file-baseline')
+def file_baseline(name: str, directory: Path, root: Path = typer.Option(DEFAULT)):
+    """Save SHA-256 hashes for a selected local folder (up to 10,000 files)."""
+    try:
+        console.print(f'[green]File baseline:[/green] {create_baseline(root, name, directory)}')
+    except (ValueError, OSError) as exc:
+        fail(exc)
+
+
+@app.command('file-verify')
+def file_verify(name: str, root: Path = typer.Option(DEFAULT)):
+    """Compare a local folder with a saved file baseline."""
+    try:
+        result = verify_baseline(root, name)
         console.print(result)
         if not result['ok']:
             raise typer.Exit(code=1)

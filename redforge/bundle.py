@@ -32,6 +32,13 @@ def export_bundle(root: Path, output: Path) -> Path:
                     target = stage / "evidence" / path.name
                     target.parent.mkdir(exist_ok=True)
                     target.write_bytes(path.read_bytes())
+        baselines = root / "file-baselines"
+        if baselines.is_dir():
+            for path in baselines.iterdir():
+                if path.is_file() and not path.is_symlink() and path.suffix == ".json":
+                    target = stage / "file-baselines" / path.name
+                    target.parent.mkdir(exist_ok=True)
+                    target.write_bytes(path.read_bytes())
         files = sorted(p for p in stage.rglob("*") if p.is_file())
         manifest = {str(p.relative_to(stage)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
         (stage / "SHA256.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

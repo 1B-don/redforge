@@ -26,6 +26,8 @@ from .review import set_review, search_findings
 from .profiles import save_profile, run_profile, list_profiles
 from .evidence_search import search_evidence
 from .overview import overview
+from .diagnostics import diagnose
+from .hostcheck import inspect as inspect_host
 
 DEFAULT_ROOT = Path('redforge-engagement')
 
@@ -45,7 +47,10 @@ class Home(Screen):
         ("10  Auto Scope / Local Interfaces", "autoscope"),
         ("11  Wi-Fi Interface Modes (Linux)", "wifi"),
         ("12  Automatic Assessment", "auto"),
-        ("13  Exit RedForge", "quit"),
+        ("13  System Readiness", "readiness"),
+        ("14  Tool Catalog", "toolbox"),
+        ("15  Local Host Audit", "hostaudit"),
+        ("16  Exit RedForge", "quit"),
     )
 
     def compose(self) -> ComposeResult:
@@ -56,10 +61,12 @@ class Home(Screen):
  | |_) |  _| | | | | |_ | | | | |_) | |  _|  _|
  |  _ <| |___| |_| |  _|| |_| |  _ <| |_| | |___
  |_| \_\_____|____/|_|   \___/|_| \_\____|_____|[/]
-[dim]     SECURITY ASSESSMENT WORKBENCH // v0.15[/]""", classes='banner', markup=True)
+[dim]     SECURITY ASSESSMENT WORKBENCH // v0.17[/]""", classes='banner', markup=True)
             yield Static('ENGAGEMENT STATUS', classes='heading')
             yield Static('Loading engagement...', id='status')
-            yield Static('SELECT: 1–9 | A=Auto Scope | B=Wi-Fi | C=Auto Assess | 0=Exit', classes='heading')
+            yield Static('Checking next step...', id='next-step')
+            yield Button('Continue Setup / Assessment', id='continue', variant='primary')
+            yield Static('SELECT: 1–9 | A=Scope | B=Wi-Fi | C=Assess | D=Ready | E=Tools | F=Host | 0=Exit', classes='heading')
             yield OptionList(*(Option(label, id=screen) for label, screen in self.MENU), id='menu')
             yield Static('Only assess assets you own or have explicit permission to test.', classes='hint')
         yield Footer()
@@ -79,11 +86,11 @@ class Home(Screen):
 
     def on_key(self, event: events.Key) -> None:
         # Airgeddon-style instant numbered selection on the home screen.
-        if event.character and event.character.lower() in '1234567890abc':
+        if event.character and event.character.lower() in '1234567890abcdef':
             event.stop()
             event.prevent_default()
             key = event.character.lower()
-            self.select_number({'0': 13, 'a': 10, 'b': 11, 'c': 12}.get(key, int(key) if key.isdigit() else 0))
+            self.select_number({'0': 16, 'a': 10, 'b': 11, 'c': 12, 'd': 13, 'e': 14, 'f': 15}.get(key, int(key) if key.isdigit() else 0))
 
     def select_number(self, number: int) -> None:
         if not 1 <= number <= len(self.MENU):
@@ -96,14 +103,23 @@ class Home(Screen):
 
     def refresh_status(self):
         try:
-            state = overview(self.app.engagement_root)
+            diagnostics = diagnose(self.app.engagement_root)
+            state = diagnostics['engagement']
+            self.query_one('#next-step', Static).update(f"[bold]NEXT:[/] {diagnostics['next_step']['label']}")
+            if state is None:
+                raise ValueError('No engagement')
             findings = sum(state['findings'].values())
             message = (f"[bold]{state['engagement']}[/] | AUTH: {'YES' if state['authorized'] else 'NO'} "
                        f"| SCOPE: {state['scope_active']} active / {state['scope_expired']} expired "
-                       f"| FINDINGS: {findings} | RUNS: {state['runs']}")
+                       f"| FINDINGS: {findings} | HOST AUDITS: {state['host_audits']} | RUNS: {state['runs']}")
         except (ValueError, OSError, TypeError):
             message = '[yellow]No engagement loaded. Select 01 to create or open one.[/]'
         self.query_one('#status', Static).update(message)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == 'continue':
+            target = diagnose(self.app.engagement_root)['next_step']['screen']
+            self.app.push_screen(target)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected):
         if event.option_id == 'quit':
@@ -182,6 +198,138 @@ class BaseScreen(Screen):
     @property
     def root(self) -> Path:
         return self.app.engagement_root
+
+
+class Readiness(BaseScreen):
+    title_text = 'System Readiness'
+    ACTIONS = (('refresh', 'refresh'), ('continue', 'continue'))
+
+    def content(self):
+        yield Label('Local tool and engagement checks. No network assessment is started here.')
+        yield Button('1  Refresh Readiness', id='refresh', variant='primary')
+        yield DataTable(id='checks')
+        yield Static('', id='next-action')
+        yield Button('2  Go to Next Step', id='continue')
+
+    def on_mount(self):
+        super().on_mount()
+        self.query_one('#checks', DataTable).add_columns('Check', 'Status', 'Detail')
+        self.refresh_checks()
+
+    def refresh_checks(self):
+        result = diagnose(self.root)
+        table = self.query_one('#checks', DataTable)
+        table.clear()
+        for item in result['checks']:
+            table.add_row(item['name'], item['status'], item['detail'])
+        self.query_one('#next-action', Static).update(f"Next: {result['next_step']['label']}")
+
+    def handle_action(self, action):
+        if action == 'refresh':
+            self.refresh_checks()
+        elif action == 'continue':
+            target = diagnose(self.root)['next_step']['screen']
+            if target != 'readiness':
+                self.app.push_screen(target)
+            else:
+                self.show_message('Install Nmap, then refresh readiness.')
+
+
+class ToolCatalog(BaseScreen):
+    title_text = 'Cybersecurity Tool Catalog'
+    ACTIONS = (('open', 'open'),)
+    TOOLS = (
+        ('Assessment', 'Automatic assessment', 'Scoped TCP, SSH, HTTP, TLS, and change alerts', 'auto'),
+        ('Assessment', 'TCP scan', 'Bounded Nmap scan of one approved IP', 'scan'),
+        ('Assessment', 'HTTP inspection', 'Headers and cookie flag observations', 'web'),
+        ('Assessment', 'Local network suggestions', 'Read-only private network discovery', 'autoscope'),
+        ('Assessment', 'Wi-Fi modes (Linux)', 'Explicit interface mode switch', 'wifi'),
+        ('Local defense', 'File integrity', 'Baseline and verify a selected folder', 'advanced'),
+        ('Local defense', 'Host audit', 'Read-only local firewall and platform checks', 'hostaudit'),
+        ('Local defense', 'Evidence integrity', 'Create and verify evidence hashes', 'advanced'),
+        ('Local defense', 'TLS and SSH inspection', 'Inspect service identity and certificate health', 'advanced'),
+        ('Local defense', 'System readiness', 'Check platform tools and setup', 'readiness'),
+        ('Evidence', 'Findings review', 'Search, confirm, dismiss, and annotate observations', 'findings'),
+        ('Evidence', 'Asset inventory', 'Review discovered hosts and services', 'assets'),
+        ('Evidence', 'Assessment history', 'Audit events and previous actions', 'history'),
+        ('Evidence', 'Reports and bundle', 'Export HTML, JSON, and verified evidence ZIP', 'reports'),
+        ('Setup', 'Engagement and authorization', 'Create or open a workspace', 'engagement'),
+        ('Setup', 'Scope management', 'Add, expire, or revoke target ranges', 'scope'),
+    )
+
+    def content(self):
+        yield Label('Search tools by name, category, or description')
+        yield Input(placeholder='e.g. file, TLS, report, scope', id='search')
+        yield DataTable(id='tools')
+        yield Button('1  Open Selected Tool', id='open', variant='primary')
+
+    def on_mount(self):
+        super().on_mount()
+        table = self.query_one('#tools', DataTable)
+        table.cursor_type = 'row'
+        table.add_columns('Area', 'Tool', 'Purpose')
+        self.refresh_tools()
+
+    def on_input_changed(self, event: Input.Changed):
+        if event.input.id == 'search':
+            self.refresh_tools()
+
+    def refresh_tools(self):
+        query = self.query_one('#search', Input).value.strip().casefold()
+        self.visible_tools = [tool for tool in self.TOOLS if query in ' '.join(tool[:3]).casefold()]
+        table = self.query_one('#tools', DataTable)
+        table.clear()
+        for area, name, purpose, _screen in self.visible_tools:
+            table.add_row(area, name, purpose)
+        self.show_message(f'{len(self.visible_tools)} tool(s) found.')
+
+    def handle_action(self, action):
+        if action != 'open':
+            return
+        index = self.query_one('#tools', DataTable).cursor_row
+        if index < 0 or index >= len(self.visible_tools):
+            self.show_message('Select a tool first.')
+            return
+        self.app.push_screen(self.visible_tools[index][3])
+
+
+class HostAudit(BaseScreen):
+    title_text = 'Local Host Audit'
+    ACTIONS = (('run', 'run'),)
+
+    def content(self):
+        yield Label('Read-only checks of this computer. Results are saved to the engagement.')
+        yield Button('1  Inspect This Computer', id='run', variant='primary')
+        yield DataTable(id='checks')
+
+    def on_mount(self):
+        super().on_mount()
+        self.query_one('#checks', DataTable).add_columns('Control', 'Status')
+
+    def handle_action(self, action):
+        if action == 'run':
+            self.query_one('#run', Button).disabled = True
+            self.show_message('Checking local security settings...')
+            self.run_audit()
+
+    @work(thread=True, exclusive=True)
+    def run_audit(self):
+        try:
+            result = inspect_host(self.root)
+            checks = result['checks']
+            message = f"Recorded {len(checks)} local security observation(s)."
+        except Exception as exc:
+            checks, message = [], f'Error: {exc}'
+        if self.is_mounted:
+            self.app.call_from_thread(self.finish_audit, checks, message)
+
+    def finish_audit(self, checks, message):
+        table = self.query_one('#checks', DataTable)
+        table.clear()
+        for item in checks:
+            table.add_row(item['name'], item['status'])
+        self.show_message(message)
+        self.query_one('#run', Button).disabled = False
 
 
 class Engagement(BaseScreen):
@@ -685,7 +833,8 @@ Requires Nmap, a valid scope entry, and authorization acknowledgement.
 
 [bold]4. HTTP INSPECTION[/]
 Select [bold]4[/]. Enter a scoped IP and port. Choose HTTP or HTTPS.
-Missing headers are observations, not proof of an exploitable weakness.
+Missing headers and cookie flags are observations, not proof of an exploitable weakness.
+Cookie values are redacted from evidence.
 
 [bold]5–7. REVIEW RESULTS[/]
 Browse discovered assets, stored findings/evidence, and audit history.
@@ -704,8 +853,17 @@ Each completed run receives an ID. Advanced Tools → 7 compares the latest two.
 Enter a profile name to save and rerun approved targets. Changes from the
 previous run appear as alerts; stored profiles recheck scope when run.
 
+[bold]ADVANCED TOOLS 8–9. FILE INTEGRITY[/]
+Select a local folder and baseline name to hash up to 10,000 regular files.
+Verify later to find changed, missing, or new files. Symlinks are skipped.
+
+[bold]F. LOCAL HOST AUDIT[/]
+Check this computer's firewall and platform controls without changing settings.
+Results are saved as evidence for analyst review.
+
 [bold]KEYBOARD SHORTCUTS[/]
-Home: 1–9 select modules; A = Auto Scope; B = Wi-Fi Modes; C = Auto Assessment; 0 exits. Advanced Tools → 5 opens Help. Arrow keys and Enter also work.
+Home: 1–9 select modules; A = Auto Scope; B = Wi-Fi Modes; C = Auto Assessment; D = Readiness; E = Tool Catalog; F = Host Audit; 0 exits. Advanced Tools → 5 opens Help. Arrow keys and Enter also work.
+The home Continue button opens the next setup or assessment step.
 Within modules: Tab / Shift+Tab change focus; Enter advances fields.
 Esc returns to Home. Ctrl+Q exits. No mouse required.
 
@@ -730,7 +888,8 @@ RedForge does not verify legal permission independently.
 class Advanced(BaseScreen):
     title_text = 'Advanced Tools / Help'
     ACTIONS = (('tls', 'tls'), ('manifest', 'manifest'), ('verify', 'verify'),
-               ('summary', 'summary'), ('help', 'help'), ('ssh', 'ssh'), ('compare', 'compare'))
+               ('summary', 'summary'), ('help', 'help'), ('ssh', 'ssh'), ('compare', 'compare'),
+               ('baseline', 'baseline'), ('fileverify', 'fileverify'))
 
     def content(self):
         yield Static('Service checks require a scoped, authorized literal IP. Evidence tools are local-only.')
@@ -745,6 +904,11 @@ class Advanced(BaseScreen):
         yield Button('5  Open Help / User Guide', id='help')
         yield Button('6  Inspect SSH Banner', id='ssh')
         yield Button('7  Compare Latest Two Assessments', id='compare')
+        yield Label('Offline file integrity folder and baseline name')
+        yield Input(placeholder='/path/to/folder', id='folder')
+        yield Input(placeholder='baseline-name', id='baseline-name')
+        yield Button('8  Create File Baseline', id='baseline')
+        yield Button('9  Verify File Baseline', id='fileverify')
         yield RichLog(id='results', wrap=True, markup=False)
 
     def on_mount(self):
@@ -767,6 +931,17 @@ class Advanced(BaseScreen):
             self.query_one(f'#{action}', Button).disabled = True
             self.show_message(f'Inspecting {action.upper()}...')
             self.inspect_service(action, self.query_one('#target', Input).value.strip(), port)
+            return
+        if action in ('baseline', 'fileverify'):
+            name = self.query_one('#baseline-name', Input).value.strip()
+            directory = self.query_one('#folder', Input).value.strip()
+            if action == 'baseline' and not directory:
+                self.show_message('Enter a folder to baseline.')
+                return
+            self.cancel_event.clear()
+            self.query_one(f'#{action}', Button).disabled = True
+            self.show_message('Hashing local files...')
+            self.run_fileguard(action, name, directory)
             return
         try:
             if action == 'manifest':
@@ -818,6 +993,29 @@ class Advanced(BaseScreen):
     def finish_service(self, service, message):
         self.show_message(message)
         self.query_one(f'#{service}', Button).disabled = False
+
+    @work(thread=True, exclusive=True)
+    def run_fileguard(self, action, name, directory):
+        from .fileguard import create_baseline, verify_baseline
+        details = None
+        try:
+            if action == 'baseline':
+                result = create_baseline(self.root, name, Path(directory), cancel=self.cancel_event)
+                message = f'File baseline saved: {result}'
+            else:
+                result = verify_baseline(self.root, name, cancel=self.cancel_event)
+                message = f"File integrity {'OK' if result['ok'] else 'CHANGED'}: {len(result['changed'])} changed, {len(result['missing'])} missing, {len(result['untracked'])} new"
+                details = str(result)
+        except Exception as exc:
+            message = f'Error: {exc}'
+        if self.is_mounted and not self.cancel_event.is_set():
+            self.app.call_from_thread(self.finish_fileguard, action, message, details)
+
+    def finish_fileguard(self, action, message, details):
+        self.show_message(message)
+        if details:
+            self.query_one('#results', RichLog).write(details)
+        self.query_one(f'#{action}', Button).disabled = False
 
 class AutoScope(BaseScreen):
     title_text = 'Auto Scope / Local Network Suggestions'
@@ -972,7 +1170,8 @@ class RedForgeTUI(App):
     SCREENS = {'home': Home, 'engagement': Engagement, 'scope': Scope, 'scan': Scan,
                'web': Web, 'assets': Assets, 'findings': Findings,
                'history': History, 'reports': Reports, 'help': Help, 'advanced': Advanced,
-               'autoscope': AutoScope, 'wifi': WiFiModes, 'auto': AutomaticAssessment}
+               'autoscope': AutoScope, 'wifi': WiFiModes, 'auto': AutomaticAssessment,
+               'readiness': Readiness, 'toolbox': ToolCatalog, 'hostaudit': HostAudit}
 
     def __init__(self, root: Path = DEFAULT_ROOT):
         super().__init__()
@@ -986,12 +1185,12 @@ class RedForgeTUI(App):
         if isinstance(self.focused, Input):
             return  # Never steal digits while editing IPs, ports or paths.
         digit = event.character
-        if not digit or digit.lower() not in '0123456789abc':
+        if not digit or digit.lower() not in '0123456789abcdef':
             return
         current = self.screen
         if isinstance(current, Home):
             key = digit.lower()
-            current.select_number({'0': 13, 'a': 10, 'b': 11, 'c': 12}.get(key, int(key) if key.isdigit() else 0))
+            current.select_number({'0': 16, 'a': 10, 'b': 11, 'c': 12, 'd': 13, 'e': 14, 'f': 15}.get(key, int(key) if key.isdigit() else 0))
             event.stop()
             event.prevent_default()
         elif isinstance(current, BaseScreen):
