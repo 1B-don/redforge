@@ -43,7 +43,7 @@ class Home(Screen):
         ("08  Reports", "reports"),
         ("09  Advanced Tools / Help", "advanced"),
         ("10  Auto Scope / Local Interfaces", "autoscope"),
-        ("11  Wi-Fi Interface Modes", "wifi"),
+        ("11  Wi-Fi Interface Modes (Linux)", "wifi"),
         ("12  Automatic Assessment", "auto"),
         ("13  Exit RedForge", "quit"),
     )
@@ -56,7 +56,7 @@ class Home(Screen):
  | |_) |  _| | | | | |_ | | | | |_) | |  _|  _|
  |  _ <| |___| |_| |  _|| |_| |  _ <| |_| | |___
  |_| \_\_____|____/|_|   \___/|_| \_\____|_____|[/]
-[dim]     LINUX SECURITY OPERATIONS // v0.14[/]""", classes='banner', markup=True)
+[dim]     SECURITY ASSESSMENT WORKBENCH // v0.15[/]""", classes='banner', markup=True)
             yield Static('ENGAGEMENT STATUS', classes='heading')
             yield Static('Loading engagement...', id='status')
             yield Static('SELECT: 1–9 | A=Auto Scope | B=Wi-Fi | C=Auto Assess | 0=Exit', classes='heading')
@@ -711,6 +711,7 @@ Esc returns to Home. Ctrl+Q exits. No mouse required.
 
 [bold]DATA LOCATION[/]
 Desktop installation: ~/.local/share/redforge/redforge-engagement
+macOS app: ~/Library/Application Support/RedForge/engagement
 Terminal CLI with --root: uses the selected engagement directory.
 Original assessment records remain in the directory you selected.
 
@@ -879,7 +880,8 @@ class WiFiModes(BaseScreen):
     ACTIONS = (('refresh', 'refresh'), ('monitor', 'monitor'), ('managed', 'managed'))
 
     def content(self):
-        yield Static("CAUTION: Changing Wi-Fi mode can disconnect your network.\n"
+        yield Static("Linux only. macOS does not support this mode switch through RedForge.\n"
+                     "CAUTION: Changing Wi-Fi mode can disconnect your network.\n"
                      "Monitor mode requires a compatible adapter and driver.\n"
                      "Polkit may request administrator authentication.")
         yield Button('1  Refresh Wi-Fi Adapters', id='refresh', variant='primary')

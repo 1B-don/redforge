@@ -16,6 +16,7 @@ def test_wifi_restores_previous_mode_after_verification_failure():
         return ''
 
     with patch('redforge.network.wifi_interfaces', side_effect=lambda: next(states)), \
+         patch('redforge.network.platform.system', return_value='Linux'), \
          patch('redforge.network.shutil.which', side_effect=lambda name: f'/usr/bin/{name}'), \
          patch('redforge.network._run', side_effect=run):
         with pytest.raises(RuntimeError, match='not confirmed'):

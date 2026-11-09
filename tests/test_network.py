@@ -3,6 +3,11 @@ import pytest
 from redforge import network
 
 
+@pytest.fixture(autouse=True)
+def linux_platform(monkeypatch):
+    monkeypatch.setattr(network.platform, 'system', lambda: 'Linux')
+
+
 def test_suggest_local_scope_filters_public_and_loopback(monkeypatch):
     rows = [
         {'ifname': 'lo', 'operstate': 'UNKNOWN', 'addr_info': [{'local': '127.0.0.1', 'prefixlen': 8}]},

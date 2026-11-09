@@ -26,3 +26,14 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: REDFORGE_INTEGRATION=1 python -m pytest -q -m integration
       - run: mkdir -p "$RUNNER_TEMP/redforge-home" && HOME="$RUNNER_TEMP/redforge-home" ./install-desktop.sh && test -x "$RUNNER_TEMP/redforge-home/.local/bin/redforge-desktop"
+  macos-integration:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest -q
+      - run: REDFORGE_MAC_APPS_DIR="$RUNNER_TEMP/apps" REDFORGE_MAC_SUPPORT_DIR="$RUNNER_TEMP/support" ./install-macos.sh
+      - run: plutil -lint "$RUNNER_TEMP/apps/RedForge.app/Contents/Info.plist" && test -x "$RUNNER_TEMP/apps/RedForge.app/Contents/MacOS/RedForge" && "$RUNNER_TEMP/support/venv/bin/redforge" --help >/dev/null

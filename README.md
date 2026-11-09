@@ -1,8 +1,18 @@
-# RedForge 0.14
+# RedForge 0.15
 
-RedForge is a Linux terminal workbench for explicitly authorized security assessments. It records scope, observations, evidence, and audit history in a local engagement directory. Active checks require an authorization acknowledgement and a literal IP address within configured scope.
+RedForge is a macOS and Linux terminal workbench for explicitly authorized security assessments. It records scope, observations, evidence, and audit history in a local engagement directory. Active checks require an authorization acknowledgement and a literal IP address within configured scope.
 
-## Install from this repository
+## macOS app
+
+Requires macOS 11 or newer and Python 3.10 or newer. From this repository, run:
+
+```bash
+./install-macos.sh
+```
+
+The installer creates `~/Applications/RedForge.app` with a branded icon. Double-clicking it opens the keyboard-driven dashboard in Terminal. The Python runtime is installed at `~/Library/Application Support/RedForge/venv`; engagement data is stored at `~/Library/Application Support/RedForge/engagement` and is preserved on reinstall or uninstall. TCP scans require Nmap (`brew install nmap`). Local network suggestions use macOS `ifconfig`; adding a suggested range still requires an authorization reference. Wi-Fi monitor/managed mode switching remains Linux only. Run `./uninstall-macos.sh` to remove the app and runtime while retaining engagement data.
+
+## Linux desktop install
 
 Requires Python 3.10 or newer. The desktop launcher requires a supported Linux terminal emulator. TCP scanning requires Nmap; local interface discovery requires `iproute2`; Wi-Fi tools require `iw`, and mode changes also require `pkexec`.
 
@@ -58,4 +68,4 @@ python3 -m pip install -e '.[dev]'
 python3 -m pytest -q
 ```
 
-GitHub Actions runs the unit suite on three Python versions. A separate Linux job runs a real loopback Nmap scan, a headless dashboard navigation check, and a desktop installer smoke check. Wi-Fi recovery is covered by a simulated failure test; hardware-specific Wi-Fi behavior still requires a compatible Linux adapter for live validation.
+GitHub Actions runs the unit suite on three Python versions. Separate Linux and macOS jobs validate their installers. The Linux job also runs a real loopback Nmap scan and headless dashboard navigation check. Wi-Fi recovery is covered by a simulated failure test; hardware-specific Wi-Fi behavior still requires a compatible Linux adapter for live validation.

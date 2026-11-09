@@ -7,6 +7,7 @@ import threading
 import time
 import os
 import signal
+import platform
 from pathlib import Path
 from defusedxml import ElementTree
 from .core import connect, require_target, audit, evidence_file, add_finding, now
@@ -31,7 +32,8 @@ def scan(root: Path, target: str, ports: str = "22,80,443,8080", cancel: threadi
     with connect(root) as db:
         target = require_target(db, target)
         if not shutil.which("nmap"):
-            raise ValueError("Nmap is missing. Install it with: sudo apt install nmap")
+            hint = "brew install nmap" if platform.system() == "Darwin" else "sudo apt install nmap"
+            raise ValueError(f"Nmap is missing. Install it with: {hint}")
         cmd = ["nmap", "-sT", "-Pn", "-n", "--max-retries", "1", "--host-timeout", "90s", "-p", ",".join(map(str, nums)), "-oX", "-", target]
         audit(db, "scan_start", json.dumps({"target": target, "ports": nums}))
         # A cancellable process group ensures Back/ESC actually stops Nmap.

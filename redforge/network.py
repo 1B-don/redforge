@@ -5,6 +5,7 @@ No active scan or scope change is performed by interface discovery.
 from __future__ import annotations
 import ipaddress
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -28,6 +29,8 @@ def _run(argv: list[str], timeout: int = 12) -> str:
 
 def suggest_local_scopes() -> list[NetworkSuggestion]:
     """Suggest RFC1918/ULA subnets; never save or authorize them automatically."""
+    if platform.system() == 'Darwin':
+        return _suggest_macos_scopes()
     ip = shutil.which('ip')
     if not ip:
         raise RuntimeError('Install iproute2 to discover interfaces.')
@@ -60,8 +63,49 @@ def suggest_local_scopes() -> list[NetworkSuggestion]:
     return sorted(suggestions, key=lambda s: (s.interface, s.cidr))
 
 
+def _suggest_macos_scopes() -> list[NetworkSuggestion]:
+    ifconfig = shutil.which('ifconfig')
+    if not ifconfig:
+        raise RuntimeError('macOS ifconfig is required to discover interfaces.')
+    output = _run([ifconfig, '-a'])
+    suggestions = set()
+    iface = None
+    active = False
+    for line in output.splitlines():
+        if line and not line[0].isspace():
+            match = re.match(r'^([A-Za-z0-9_.:-]{1,15}):\s+flags=.*<([^>]*)>', line)
+            iface = match.group(1) if match else None
+            active = bool(match and 'UP' in match.group(2).split(',') and iface != 'lo0')
+            continue
+        if not active or not iface:
+            continue
+        match4 = re.match(r'^\s+inet\s+(\S+)\s+netmask\s+0x([0-9a-fA-F]{8})', line)
+        match6 = re.match(r'^\s+inet6\s+(\S+)\s+prefixlen\s+(\d+)', line)
+        try:
+            if match4:
+                address = ipaddress.IPv4Address(match4.group(1))
+                mask = ipaddress.IPv4Address(int(match4.group(2), 16))
+                net = ipaddress.ip_network(f'{address}/{mask}', strict=False)
+                if not any(address in ipaddress.ip_network(n) for n in
+                           ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')):
+                    continue
+            elif match6:
+                address = ipaddress.IPv6Address(match6.group(1).split('%', 1)[0])
+                net = ipaddress.ip_network(f'{address}/{match6.group(2)}', strict=False)
+                if address not in ipaddress.ip_network('fc00::/7'):
+                    continue
+            else:
+                continue
+            suggestions.add(NetworkSuggestion(iface, str(address), str(net)))
+        except ValueError:
+            continue
+    return sorted(suggestions, key=lambda s: (s.interface, s.cidr))
+
+
 def wifi_interfaces() -> list[tuple[str, str]]:
     """Return (interface, current type) for interfaces reported by iw."""
+    if platform.system() == 'Darwin':
+        raise RuntimeError('Wi-Fi mode switching is available only on Linux; macOS does not provide the required iw/polkit controls.')
     iw = shutil.which('iw')
     if not iw:
         raise RuntimeError('Install iw to inspect Wi-Fi interfaces.')
@@ -87,6 +131,8 @@ def change_wifi_mode(interface: str, mode: str, *, confirmed: bool = False) -> s
 
     This disconnects the interface. No arbitrary command strings or shell are used.
     """
+    if platform.system() == 'Darwin':
+        raise RuntimeError('Wi-Fi mode switching is available only on Linux.')
     if not confirmed:
         raise ValueError('Explicit confirmation required before changing wireless mode.')
     if not IFNAME.fullmatch(interface):
